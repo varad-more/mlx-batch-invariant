@@ -193,6 +193,12 @@ PYTHONPATH=. .venv/bin/python bench/bench.py all
 uv pip install mlx-lm && .venv/bin/python bench/real_model.py   # real 4-bit checkpoint
 ```
 
+CI runs the suite on GitHub's macOS runners, whose GPU is virtualised
+(`Apple Paravirtual device`). That checks portability, not behaviour on real
+Apple Silicon — stock MLX's quantized kernels are already invariant there, so the
+quantized negative control skips. `mlx-bi verify` on the hardware you actually
+run on is the proof.
+
 ## License
 
 MIT.

@@ -140,11 +140,13 @@ def verify(argv=None):
             qref = b
         elif (b != qref).any():
             qbad.append(B)
+    # Unlike the float control this one is device-dependent: virtualised GPUs pick
+    # different quantized kernels and can be invariant already.  Report it, do not
+    # fail on it -- it says something about the device, not about this library.
     print("control: stock quantized_matmul int4  K=2048 N=2048 -> %s"
           % ("VARIANT at batch %s (expected)" % qbad if qbad
-             else "invariant -- stock MLX may have been fixed"))
-    if not qbad:
-        fails += 1
+             else "already invariant on this device -- the quantized path is not "
+                  "proving anything here"))
 
     print("\n%s" % ("FAILED (%d cases)" % fails if fails else "all invariant"))
     return 1 if fails else 0

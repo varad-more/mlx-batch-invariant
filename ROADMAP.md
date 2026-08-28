@@ -14,6 +14,16 @@ is materialised in fp16 for every call, which is why decode is the worst case: a
 single row of activations pays for the entire matrix. A fused invariant kernel that
 dequantizes per tile inside the K loop would remove nearly all of it.
 
+**Stock MLX's quantized variance is device-dependent.** On this M4
+(`applegpu_g16g`) stock `quantized_matmul` moves most of the output bits between
+batch 1 and batch 2. On the virtualised GPU GitHub's macOS runners expose
+(`Apple Paravirtual device`, `air64_v27`) MLX selects different quantized kernels
+and the same shapes come out already invariant, so the negative control skips
+there instead of failing. The float `matmul` control is variant on both. Two
+consequences: CI is a portability smoke test, not the proof — run `mlx-bi verify`
+on the real hardware you care about — and any Phase 0-style measurement must be
+redone per device rather than assumed from this one.
+
 **Attention sinks are unsupported.** `mx.fast.scaled_dot_product_attention(...,
 sinks=...)` falls through to stock MLX (or raises, under `strict=True`). The kernel
 change is small — seed the running max and sum from the sink logit in simdgroup 0,
