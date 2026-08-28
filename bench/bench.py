@@ -246,9 +246,49 @@ def determinism(dtype, out):
         mx.clear_cache()
 
 
+def quant(dtype, out):
+    """Stock fused quantized_matmul vs dequantize-then-invariant-GEMM.
+
+    This is the most expensive thing the library does: it materialises an fp16 copy
+    of the weight on every call, so the ratio here is a ceiling, not a fixed cost.
+    """
+    import mlx.nn as nn
+
+    h, i = CFG["hidden"], CFG["inter"]
+    print("\n### Quantized linear  (stock int4 quantized_matmul vs invariant)\n")
+    print("| shape (M x K x N) | role | stock ms | invariant ms | ratio |")
+    print("|---|---|---:|---:|---:|")
+    for M, K, N, role in [
+        (1, h, h, "o_proj, decode"),
+        (1, h, 2 * i, "gate+up, decode"),
+        (1, i, h, "down_proj, decode"),
+        (256, h, h, "o_proj, prefill"),
+        (256, h, 2 * i, "gate+up, prefill"),
+    ]:
+        lin = nn.Linear(K, N, bias=False)
+        lin.apply(lambda a: a.astype(dtype))
+        q = nn.QuantizedLinear.from_linear(lin, bits=4)
+        x = mx.random.normal((M, K)).astype(dtype)
+        mx.eval(x, q.parameters())
+
+        def stock_fn():
+            return q(x)
+
+        def inv_fn():
+            with bi.batch_invariant_mode():
+                return q(x)
+
+        ta, tb, r = ab(stock_fn, inv_fn)
+        print("| %d x %d x %d | %s | %.3f | %.3f | %.2fx |"
+              % (M, K, N, role, ta * 1e3, tb * 1e3, r))
+        out.append(dict(kind="quant", M=M, K=K, N=N, role=role,
+                        stock_ms=ta * 1e3, invariant_ms=tb * 1e3, ratio=r))
+        mx.clear_cache()
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("what", choices=["micro", "e2e", "determinism", "all"])
+    p.add_argument("what", choices=["micro", "quant", "e2e", "determinism", "all"])
     p.add_argument("--dtype", default="float16", choices=["float32", "float16", "bfloat16"])
     p.add_argument("--json", default=None)
     a = p.parse_args()
@@ -259,6 +299,8 @@ def main():
     out = []
     if a.what in ("micro", "all"):
         micro(dtype, out)
+    if a.what in ("quant", "all"):
+        quant(dtype, out)
     if a.what in ("e2e", "all"):
         e2e(dtype, out)
     if a.what in ("determinism", "all"):

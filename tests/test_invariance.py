@@ -409,3 +409,182 @@ class TestDeviceAssumptions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQuantizedInvariance(unittest.TestCase):
+    """Every MLX checkpoint worth running on this machine is 4-bit, so quantized
+    matmul has to be invariant or the library does not apply to real models."""
+
+    def _layer(self, in_f, out_f, bias, bits_, dtype, seed=41):
+        import mlx.nn as nn
+        mx.random.seed(seed)
+        lin = nn.Linear(in_f, out_f, bias=bias)
+        lin.apply(lambda p: p.astype(dtype))
+        return nn.QuantizedLinear.from_linear(lin, bits=bits_)
+
+    def test_stock_quantized_matmul_is_batch_variant(self):
+        """Negative control. If this ever passes, MLX fixed it upstream and the
+        shim below is no longer proving anything."""
+        q = self._layer(512, 1024, False, 4, mx.float16)
+        ref, pool = rn((1, 512), mx.float16, 42), rn((8, 512), mx.float16, 43)
+        mx.eval(ref, pool)
+        base = bits(q(ref)[0])
+        total = sum(int((bits(q(batch_with(ref, pool, B, 0))[0]) != base).sum())
+                    for B in (2, 8))
+        self.assertGreater(total, 0,
+                           "stock quantized_matmul is now batch-invariant on this "
+                           "machine; the quantized shim no longer proves anything")
+
+    def test_quantized_linear_is_invariant_under_mode(self):
+        for dname, dtype in (("float16", mx.float16), ("bfloat16", mx.bfloat16)):
+            for nbits in (4, 8):
+                for use_bias in (False, True):
+                    q = self._layer(512, 1024, use_bias, nbits, dtype)
+                    ref = rn((1, 512), dtype, 44)
+                    pool = rn((max(BATCHES), 512), dtype, 45)
+                    mx.eval(ref, pool)
+                    with bi.batch_invariant_mode(strict=True):
+                        base = None
+                        for B in BATCHES:
+                            idx = B // 2
+                            y = q(batch_with(ref, pool, B, idx))
+                            mx.eval(y)
+                            got = bits(y[idx])
+                            if base is None:
+                                base = got
+                                self.assertTrue(bool(mx.any(y != 0).item()),
+                                                "degenerate output")
+                            else:
+                                self.assertEqual(
+                                    int((got != base).sum()), 0,
+                                    "quantized %s bits=%d bias=%s B=%d"
+                                    % (dname, nbits, use_bias, B))
+
+    def test_quantized_leading_dims_are_invariant(self):
+        """A 3D activation must give the same row whether it arrives alone or
+        stacked -- this is the prefill-vs-decode case."""
+        q = self._layer(512, 256, True, 4, mx.float16)
+        ref, pool = rn((1, 5, 512), mx.float16, 46), rn((8, 5, 512), mx.float16, 47)
+        mx.eval(ref, pool)
+        with bi.batch_invariant_mode(strict=True):
+            base = None
+            for B in (1, 2, 3, 8):
+                y = q(batch_with(ref, pool, B, 0))
+                mx.eval(y)
+                got = bits(y[0])
+                if base is None:
+                    base = got
+                else:
+                    self.assertEqual(int((got != base).sum()), 0, "quantized 3D B=%d" % B)
+
+    def test_quantized_accuracy_matches_stock(self):
+        """Dequantize-then-invariant-GEMM must not be less accurate than the fused
+        stock kernel, measured against a float32 reference on the same weights."""
+        q = self._layer(512, 1024, False, 4, mx.float16)
+        x = rn((4, 512), mx.float16, 48)
+        mx.eval(x)
+        w = mx.dequantize(q["weight"], scales=q["scales"], biases=q.get("biases"),
+                          group_size=q.group_size, bits=q.bits, mode=q.mode)
+        exact = np.array(x.astype(mx.float32)) @ np.array(w.astype(mx.float32)).T
+        stock = np.array(q(x).astype(mx.float32))
+        with bi.batch_invariant_mode(strict=True):
+            ours = np.array(q(x).astype(mx.float32))
+        e_stock = np.abs(stock - exact).max()
+        e_ours = np.abs(ours - exact).max()
+        self.assertLessEqual(e_ours, e_stock * 2 + 1e-6,
+                             "invariant quantized path is much less accurate: "
+                             "%g vs stock %g" % (e_ours, e_stock))
+
+
+class TestCompiled(unittest.TestCase):
+    """mx.compile reorders and fuses the graph around these kernels. It must not
+    reorder anything inside them."""
+
+    def test_attention_is_invariant_under_compile(self):
+        H, Hkv, N, D = 16, 8, 2048, 128
+        QLS = [1, 2, 4, 8, 9, 16]
+        for dname, dtype in DTYPES:
+            k, v = rn((1, Hkv, N, D), dtype, 51), rn((1, Hkv, N, D), dtype, 52)
+            qf = rn((1, H, max(QLS), D), dtype, 53)
+            mx.eval(k, v, qf)
+            fn = mx.compile(lambda q: bi.scaled_dot_product_attention(q, k, v))
+            base = None
+            for qL in QLS:
+                q = mx.contiguous(qf[:, :, max(QLS) - qL:, :])
+                y = fn(q)
+                mx.eval(y)
+                got = bits(mx.contiguous(y[:, :, -1, :]))
+                if base is None:
+                    base = got
+                else:
+                    self.assertEqual(int((got != base).sum()), 0,
+                                     "compiled sdpa %s qL=%d" % (dname, qL))
+
+    def test_mode_holds_for_function_compiled_inside(self):
+        """A function first traced inside the context captures the invariant
+        kernels and stays invariant for every later call inside it."""
+        import mlx.nn as nn
+        mx.random.seed(54)
+        net = nn.Sequential(nn.Linear(256, 512), nn.GELU(), nn.Linear(512, 128))
+        net.apply(lambda p: p.astype(mx.float16))
+        ref, pool = rn((1, 256), mx.float16, 55), rn((16, 256), mx.float16, 56)
+        mx.eval(ref, pool, net.parameters())
+        with bi.batch_invariant_mode(strict=True):
+            fn = mx.compile(net)
+            base = None
+            for B in (1, 2, 3, 8, 16):
+                idx = B // 2
+                y = fn(batch_with(ref, pool, B, idx))
+                mx.eval(y)
+                got = bits(y[idx])
+                if base is None:
+                    base = got
+                else:
+                    self.assertEqual(int((got != base).sum()), 0,
+                                     "compiled-inside mode B=%d" % B)
+
+
+class TestStrictMode(unittest.TestCase):
+    """strict=True promises an exception rather than a silent variant result."""
+
+    def test_unsupported_attention_raises(self):
+        q = rn((1, 4, 1, 48), mx.float16, 61)   # head dim 48 is not a multiple of 32
+        k = rn((1, 4, 128, 48), mx.float16, 62)
+        v = rn((1, 4, 128, 48), mx.float16, 63)
+        mx.eval(q, k, v)
+        with bi.batch_invariant_mode(strict=True):
+            with self.assertRaises(NotImplementedError):
+                mx.fast.scaled_dot_product_attention(q, k, v, scale=0.1)
+
+    def test_unsupported_falls_back_when_not_strict(self):
+        q = rn((1, 4, 1, 48), mx.float16, 61)
+        k = rn((1, 4, 128, 48), mx.float16, 62)
+        v = rn((1, 4, 128, 48), mx.float16, 63)
+        mx.eval(q, k, v)
+        with bi.batch_invariant_mode(strict=False):
+            y = mx.fast.scaled_dot_product_attention(q, k, v, scale=0.1)
+            mx.eval(y)
+        self.assertEqual(y.shape, (1, 4, 1, 48))
+
+    def test_originals_are_restored_even_on_exception(self):
+        import mlx.nn as nn
+        before = (mx.matmul, mx.addmm, mx.fast.scaled_dot_product_attention,
+                  mx.quantized_matmul, nn.Linear.__call__, mx.array.__matmul__)
+        with self.assertRaises(RuntimeError):
+            with bi.batch_invariant_mode():
+                self.assertTrue(bi.is_enabled())
+                raise RuntimeError("boom")
+        after = (mx.matmul, mx.addmm, mx.fast.scaled_dot_product_attention,
+                 mx.quantized_matmul, nn.Linear.__call__, mx.array.__matmul__)
+        self.assertEqual(before, after)
+        self.assertFalse(bi.is_enabled())
+
+    def test_nesting_restores_only_at_the_outermost_exit(self):
+        stock = mx.matmul
+        with bi.batch_invariant_mode():
+            patched = mx.matmul
+            self.assertIsNot(patched, stock)
+            with bi.batch_invariant_mode():
+                self.assertIs(mx.matmul, patched)
+            self.assertIs(mx.matmul, patched, "inner exit unpatched too early")
+        self.assertIs(mx.matmul, stock)

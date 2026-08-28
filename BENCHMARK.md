@@ -58,6 +58,18 @@ patterns.
 Stock MLX changes 82% of the logit bits for an unchanged prompt purely because
 other sequences were in flight. That is the defect. Everything below is its price.
 
+The same measurement on a real 4-bit checkpoint rather than a synthetic one
+(`bench/real_model.py`, mlx-community/Qwen1.5-0.5B-Chat-4bit, 7-token prompt):
+
+| path | batch 2 | batch 4 | batch 8 |
+|---|---:|---:|---:|
+| stock MLX | 113360 / 151936 | 121209 / 151936 | 117380 / 151936 |
+| batch invariant | **0 / 151936** | **0 / 151936** | **0 / 151936** |
+
+Under `strict=True` nothing in that model raised, and generation from the invariant
+path is coherent — so the kernels are correct on trained weights, not just
+invariant on random ones.
+
 ## End to end
 
 16-layer Qwen3-1.7B-shaped decoder (hidden 2048, ffn 6144, 16 heads / 8 kv heads,
@@ -95,6 +107,25 @@ Stock `mx.matmul` against `mlx_batch_invariant.linear`.
 | 128 × 2048 × 12288 | gate+up, batch 128 | 2.459 | 5.752 | 2.26x |
 | 512 × 2048 × 12288 | gate+up, prefill 512 | 8.988 | 23.073 | 2.58x |
 | 2048 × 2048 × 2048 | o_proj, prefill 2048 | 5.914 | 14.512 | 2.54x |
+
+## Quantized linear — float16 activations, int4 weights
+
+Stock fused `quantized_matmul` against dequantize-then-invariant-GEMM.
+
+| shape (M x K x N) | role | stock ms | invariant ms | ratio |
+|---|---|---:|---:|---:|
+| 1 x 2048 x 2048 | o_proj, decode | 0.227 | 0.962 | 3.33x |
+| 1 x 2048 x 12288 | gate+up, decode | 0.385 | 2.679 | 6.89x |
+| 1 x 6144 x 2048 | down_proj, decode | 0.314 | 1.630 | 5.40x |
+| 256 x 2048 x 2048 | o_proj, prefill | 0.914 | 2.470 | 2.70x |
+| 256 x 2048 x 12288 | gate+up, prefill | 4.355 | 12.280 | 2.79x |
+
+This is the most expensive thing the library does, and the shape of the cost says
+why: decode is worse than prefill, and the worst cell is the widest weight. A
+single row of activations pays to dequantize a 2048 x 12288 matrix. Prefill
+amortises the same dequantization over 256 rows and lands back near the plain GEMM
+ratio. Nothing here is a cost of invariance — a kernel that dequantized per tile
+inside the K loop would be equally invariant. See ROADMAP.md.
 
 ## Attention microbenchmark — float16
 

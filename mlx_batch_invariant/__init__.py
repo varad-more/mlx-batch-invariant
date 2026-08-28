@@ -53,7 +53,8 @@ def _unsupported(what, strict, fallback, *args, **kwargs):
 
 @contextlib.contextmanager
 def batch_invariant_mode(strict=True):
-    """Route MLX's matmul, addmm, ``@``, nn.Linear and SDPA through invariant kernels.
+    """Route MLX's matmul, addmm, ``@``, nn.Linear, SDPA and quantized_matmul
+    through invariant kernels.
 
     Ops this library cannot make invariant raise ``NotImplementedError``.  With
     ``strict=False`` they fall back to stock MLX instead, which means the result is
@@ -77,6 +78,7 @@ def batch_invariant_mode(strict=True):
         "matmul_op": mx.array.__matmul__,
         "sdpa": mx.fast.scaled_dot_product_attention,
         "linear": nn.Linear.__call__,
+        "quantized_matmul": mx.quantized_matmul,
     }
 
     def bi_matmul(a, b, *, stream=None):
@@ -101,6 +103,21 @@ def batch_invariant_mode(strict=True):
                 scale=scale, mask=mask, sinks=sinks, stream=stream)
         return scaled_dot_product_attention(q, k, v, scale=scale, mask=mask)
 
+    def bi_quantized_matmul(x, w, scales, biases=None, transpose=True,
+                            group_size=None, bits=None, mode="affine", *, stream=None):
+        if not transpose or x.ndim < 2:
+            return _unsupported(
+                "quantized_matmul with transpose=%s and x.ndim=%d" % (transpose, x.ndim),
+                strict, saved["quantized_matmul"], x, w, scales, biases, transpose,
+                group_size, bits, mode, stream=stream)
+        # ponytail: dequantize the whole weight per call. Correct and invariant --
+        # dequantization is elementwise, so it cannot depend on the batch -- but it
+        # materialises an fp16 copy of every weight it touches. A fused invariant
+        # quantized kernel is ROADMAP.md item 3.
+        wd = mx.dequantize(w, scales=scales, biases=biases, group_size=group_size,
+                           bits=bits, mode=mode, dtype=x.dtype)
+        return linear(x, wd)
+
     def bi_linear_call(self, x):
         w = self["weight"]
         if x.ndim < 2 or w.ndim != 2:
@@ -112,6 +129,7 @@ def batch_invariant_mode(strict=True):
     mx.array.__matmul__ = lambda a, b: bi_matmul(a, b)
     mx.fast.scaled_dot_product_attention = bi_sdpa
     nn.Linear.__call__ = bi_linear_call
+    mx.quantized_matmul = bi_quantized_matmul
     _depth = 1
     try:
         yield
@@ -122,3 +140,4 @@ def batch_invariant_mode(strict=True):
         mx.array.__matmul__ = saved["matmul_op"]
         mx.fast.scaled_dot_product_attention = saved["sdpa"]
         nn.Linear.__call__ = saved["linear"]
+        mx.quantized_matmul = saved["quantized_matmul"]

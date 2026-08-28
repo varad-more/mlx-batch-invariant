@@ -152,12 +152,27 @@ cost of determinism: the kernel uses scalar FMAs where MLX uses `simdgroup_matri
 A simdgroup-matrix kernel with the same fixed tile would be equally invariant and
 much faster. See [ROADMAP.md](ROADMAP.md).
 
+## Quantized models
+
+4-bit checkpoints are covered. `mx.quantized_matmul` — which is what
+`nn.QuantizedLinear` calls — is routed through dequantize-then-invariant-GEMM, so a
+real MLX checkpoint is invariant end to end:
+
+```
+$ .venv/bin/python bench/real_model.py     # mlx-community/Qwen1.5-0.5B-Chat-4bit
+stock MLX      : B=2 113360/151936 bits, B=4 121209/151936 bits, B=8 117380/151936 bits
+batch-invariant: B=2 0/151936 bits, B=4 0/151936 bits, B=8 0/151936 bits
+```
+
+It costs 2.7–6.9× on the quantized layers, because the whole weight is dequantized
+on every call. That ratio is a ceiling set by an unwritten fused kernel, not by
+invariance. See [ROADMAP.md](ROADMAP.md).
+
 ## Limitations
 
-Quantized models are not covered — `batch_invariant_mode()` does nothing for a
-4-bit checkpoint. Attention sinks are unsupported. Head dimensions must be
-multiples of 32. Forward pass only, no gradients. M5 Neural Accelerator / Metal 4
-tensor paths are permanently out of scope and no number here assumes them.
+Attention sinks are unsupported. Head dimensions must be multiples of 32. Forward
+pass only, no gradients. M5 Neural Accelerator / Metal 4 tensor paths are
+permanently out of scope and no number here assumes them.
 
 ## Prior art
 
@@ -175,6 +190,7 @@ uv venv --python 3.12 && uv pip install "mlx==0.32.0" numpy
 PYTHONPATH=. .venv/bin/python -m unittest discover -s tests -v
 PYTHONPATH=. .venv/bin/python probe/probe.py selftest     # Phase 0 harness self-check
 PYTHONPATH=. .venv/bin/python bench/bench.py all
+uv pip install mlx-lm && .venv/bin/python bench/real_model.py   # real 4-bit checkpoint
 ```
 
 ## License

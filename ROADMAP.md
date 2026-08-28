@@ -5,12 +5,14 @@ it. What follows is what it deliberately does not do.
 
 ## Known limitations in v0.1
 
-**Quantized models are not covered.** `mx.quantized_matmul` and
-`nn.QuantizedLinear` are untouched, so `batch_invariant_mode()` does nothing useful
-for a 4-bit checkpoint — which is most of what people actually run under MLX on a
-laptop. The invariance question there is different and probably easier: the
-dequantise-and-accumulate path is already a single kernel. It needs measuring
-before it needs fixing, exactly as Phase 0 did for the float path.
+**Quantized matmul is invariant but slow.** Stock `mx.quantized_matmul` is
+badly batch-variant — 113360 of 151936 logit bits move between batch 1 and batch 2
+on a real 4-bit Qwen1.5-0.5B. `batch_invariant_mode()` fixes it by dequantizing the
+weight and running the invariant GEMM, which is correct (dequantization is
+elementwise, so it cannot depend on the batch) and costs 2.7–6.9×. The whole weight
+is materialised in fp16 for every call, which is why decode is the worst case: a
+single row of activations pays for the entire matrix. A fused invariant kernel that
+dequantizes per tile inside the K loop would remove nearly all of it.
 
 **Attention sinks are unsupported.** `mx.fast.scaled_dot_product_attention(...,
 sinks=...)` falls through to stock MLX (or raises, under `strict=True`). The kernel
@@ -39,7 +41,11 @@ source of overhead in the library and the first thing to fix.
    sizes, fixed iteration order, no `align_Q`/`align_K` specialisation. The
    invariance requirement is only that the block sizes are compile-time constants
    rather than functions of `qL` or `N`.
-3. **Quantized matmul.** Measure first.
+3. **A fused invariant quantized kernel.** Dequantize per tile inside the K loop
+   instead of materialising the whole weight up front. The invariance argument is
+   unchanged — group scales are per-weight, not per-batch — so this is purely a
+   memory-traffic fix, worth 2.7–6.9× on every quantized layer. Measured in
+   BENCHMARK.md under `bench.py quant`.
 
 ## Out of scope, permanently
 
