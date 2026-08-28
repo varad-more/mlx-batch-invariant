@@ -8,14 +8,14 @@
 | OS | macOS 26.5 (Darwin 25.5.0) |
 | GPU | `applegpu_g16g` |
 | MLX | 0.32.0 from PyPI, native arm64 CPython 3.12 |
-| library | `mlx-batch-invariant` 0.1.0 |
+| library | `mlx-batch-invariant` 0.2.0 |
 
 Reproduce:
 
 ```
-PYTHONPATH=. .venv/bin/python bench/bench.py micro       --dtype float16
-PYTHONPATH=. .venv/bin/python bench/bench.py e2e         --dtype float16
-PYTHONPATH=. .venv/bin/python bench/bench.py determinism --dtype float16
+.venv/bin/python bench/bench.py all   --dtype float16  --json bench/all_f16.json
+.venv/bin/python bench/bench.py micro --dtype bfloat16 --json bench/micro_bf16.json
+.venv/bin/python bench/real_model.py
 ```
 
 ## Method
@@ -30,15 +30,10 @@ long sweep; interleaving makes that drift common-mode instead of attributing it 
 whichever path ran second. Each cell is warmed once, then 9 repeats × 3 calls
 (micro) or 3 repeats (end to end).
 
-Two honesty notes on the numbers below:
-
-* Small-shape cells are dispatch-bound, not compute-bound. A 1×2048×2048 fp16 GEMM
-  is 8 MFLOP and takes 0.31 ms; almost all of that is launch and synchronisation
-  overhead, so treat those ratios as "cost of one more kernel launch shape", not as
-  arithmetic throughput.
-* The bfloat16 sweep is visibly noisier than float16 (one attention cell reads
-  2.13× where the neighbouring longer-context cell reads 0.97×). It ran later in
-  the session on a warmer machine. It is reported as measured, not smoothed.
+One honesty note: small-shape cells are dispatch-bound, not compute-bound. A
+1×2048×2048 fp16 GEMM is 8 MFLOP and takes 0.32 ms; almost all of that is launch
+and synchronisation overhead, so treat those ratios as "cost of one more kernel
+launch shape", not as arithmetic throughput.
 
 ## Headline: the thing that is actually being bought
 
@@ -48,9 +43,9 @@ patterns.
 
 | path | batch | logits differing from batch 1 |
 |---|---:|---:|
-| stock MLX | 2 | 26357 / 32000 |
-| stock MLX | 4 | 26385 / 32000 |
-| stock MLX | 8 | 26491 / 32000 |
+| stock MLX | 2 | 25812 / 32000 |
+| stock MLX | 4 | 26399 / 32000 |
+| stock MLX | 8 | 26629 / 32000 |
 | batch invariant | 2 | **0 / 32000** |
 | batch invariant | 4 | **0 / 32000** |
 | batch invariant | 8 | **0 / 32000** |
@@ -77,55 +72,66 @@ head dim 128, 32k vocab), 0.94B parameters, float16, batch 1.
 
 | phase | stock MLX | batch invariant | ratio | throughput cost |
 |---|---:|---:|---:|---:|
-| prefill 256 tok | 1609.7 tok/s | 560.6 tok/s | 2.87x | **65.2%** |
-| decode 32 tok | 39.3 tok/s | 16.1 tok/s | 2.44x | **59.0%** |
+| prefill 256 tok | 1982.4 tok/s | 913.6 tok/s | 2.17x | **53.9%** |
+| decode 32 tok | 53.6 tok/s | 27.0 tok/s | 1.99x | **49.7%** |
+
+v0.1, on the same harness, cost 65.2% of prefill and 59.0% of decode. The
+difference is the `simdgroup_matrix` GEMM (ROADMAP item 1) and the fused quantized
+kernel (item 3), both landed in v0.2.
 
 ## GEMM microbenchmark — float16
 
 Stock `mx.matmul` against `mlx_batch_invariant.linear`.
 
-| shape (M × K × N) | role | stock ms | invariant ms | ratio |
-|---|---|---:|---:|---:|
-| 1 × 2048 × 2048 | o_proj, decode | 0.306 | 0.564 | 1.86x |
-| 1 × 2048 × 12288 | gate+up, decode | 0.793 | 1.547 | 1.99x |
-| 1 × 6144 × 2048 | down_proj, decode | 0.500 | 1.164 | 2.33x |
-| 8 × 2048 × 12288 | gate+up, batch 8 | 1.241 | 1.558 | 1.26x |
-| 32 × 2048 × 12288 | gate+up, batch 32 | 1.254 | 1.615 | 1.29x |
-| 128 × 2048 × 12288 | gate+up, batch 128 | 2.125 | 5.202 | 2.43x |
-| 512 × 2048 × 12288 | gate+up, prefill 512 | 7.386 | 19.514 | 2.64x |
-| 2048 × 2048 × 2048 | o_proj, prefill 2048 | 5.015 | 13.153 | 2.61x |
+| shape (M × K × N) | role | stock ms | invariant ms | ratio | v0.1 |
+|---|---|---:|---:|---:|---:|
+| 1 × 2048 × 2048 | o_proj, decode | 0.322 | 0.659 | 1.83x | 1.86x |
+| 1 × 2048 × 12288 | gate+up, decode | 0.809 | 1.294 | 1.60x | 1.99x |
+| 1 × 6144 × 2048 | down_proj, decode | 0.496 | 0.884 | 1.73x | 2.33x |
+| 8 × 2048 × 12288 | gate+up, batch 8 | 1.253 | 1.243 | **0.99x** | 1.26x |
+| 32 × 2048 × 12288 | gate+up, batch 32 | 1.300 | 1.305 | **1.00x** | 1.29x |
+| 128 × 2048 × 12288 | gate+up, batch 128 | 2.142 | 3.908 | 1.82x | 2.43x |
+| 512 × 2048 × 12288 | gate+up, prefill 512 | 7.361 | 14.516 | 1.97x | 2.64x |
+| 2048 × 2048 × 2048 | o_proj, prefill 2048 | 5.018 | 9.875 | 1.97x | 2.61x |
+
+At batch 8 and 32 the invariant GEMM is now **at parity with stock MLX** — the
+small-batch region where MLX's own dispatch is deciding between `gemv` and
+`steel_gemm` is precisely where a single fixed kernel gives up nothing.
 
 ## GEMM microbenchmark — bfloat16
 
 | shape (M × K × N) | role | stock ms | invariant ms | ratio |
 |---|---|---:|---:|---:|
-| 1 × 2048 × 2048 | o_proj, decode | 0.785 | 1.613 | 2.00x |
-| 1 × 2048 × 12288 | gate+up, decode | 0.990 | 1.834 | 1.77x |
-| 1 × 6144 × 2048 | down_proj, decode | 0.569 | 1.180 | 2.11x |
-| 8 × 2048 × 12288 | gate+up, batch 8 | 1.391 | 1.705 | 1.27x |
-| 32 × 2048 × 12288 | gate+up, batch 32 | 1.403 | 1.787 | 1.20x |
-| 128 × 2048 × 12288 | gate+up, batch 128 | 2.459 | 5.752 | 2.26x |
-| 512 × 2048 × 12288 | gate+up, prefill 512 | 8.988 | 23.073 | 2.58x |
-| 2048 × 2048 × 2048 | o_proj, prefill 2048 | 5.914 | 14.512 | 2.54x |
+| 1 × 2048 × 2048 | o_proj, decode | 0.478 | 1.095 | 2.34x |
+| 1 × 2048 × 12288 | gate+up, decode | 0.883 | 1.753 | 1.90x |
+| 1 × 6144 × 2048 | down_proj, decode | 0.495 | 0.968 | 1.99x |
+| 8 × 2048 × 12288 | gate+up, batch 8 | 1.278 | 1.228 | 0.97x |
+| 32 × 2048 × 12288 | gate+up, batch 32 | 1.277 | 1.297 | 1.01x |
+| 128 × 2048 × 12288 | gate+up, batch 128 | 2.135 | 3.839 | 1.80x |
+| 512 × 2048 × 12288 | gate+up, prefill 512 | 7.355 | 14.172 | 1.93x |
+| 2048 × 2048 × 2048 | o_proj, prefill 2048 | 5.017 | 9.634 | 1.92x |
 
 ## Quantized linear — float16 activations, int4 weights
 
-Stock fused `quantized_matmul` against dequantize-then-invariant-GEMM.
+Stock fused `quantized_matmul` against the fused invariant quantized kernel.
 
-| shape (M x K x N) | role | stock ms | invariant ms | ratio |
-|---|---|---:|---:|---:|
-| 1 x 2048 x 2048 | o_proj, decode | 0.227 | 0.962 | 3.33x |
-| 1 x 2048 x 12288 | gate+up, decode | 0.385 | 2.679 | 6.89x |
-| 1 x 6144 x 2048 | down_proj, decode | 0.314 | 1.630 | 5.40x |
-| 256 x 2048 x 2048 | o_proj, prefill | 0.914 | 2.470 | 2.70x |
-| 256 x 2048 x 12288 | gate+up, prefill | 4.355 | 12.280 | 2.79x |
+| shape (M × K × N) | role | stock ms | invariant ms | ratio | v0.1 |
+|---|---|---:|---:|---:|---:|
+| 1 × 2048 × 2048 | o_proj, decode | 0.225 | 0.467 | 2.06x | 3.33x |
+| 1 × 2048 × 12288 | gate+up, decode | 0.382 | 1.504 | 3.90x | 6.89x |
+| 1 × 6144 × 2048 | down_proj, decode | 0.298 | 1.230 | 4.12x | 5.40x |
+| 256 × 2048 × 2048 | o_proj, prefill | 0.933 | 1.949 | 2.12x | 2.70x |
+| 256 × 2048 × 12288 | gate+up, prefill | 3.906 | 9.796 | 2.51x | 2.79x |
 
-This is the most expensive thing the library does, and the shape of the cost says
-why: decode is worse than prefill, and the worst cell is the widest weight. A
-single row of activations pays to dequantize a 2048 x 12288 matrix. Prefill
-amortises the same dequantization over 256 rows and lands back near the plain GEMM
-ratio. Nothing here is a cost of invariance — a kernel that dequantized per tile
-inside the K loop would be equally invariant. See ROADMAP.md.
+v0.1 dequantised the whole weight to fp16 and then ran the float GEMM over it, so a
+single decode row paid to materialise an entire matrix. v0.2 dequantises inside the
+B-tile load, in the K loop. The invariance argument is identical either way — a
+group's scale and bias are per-weight, not per-batch — so this was always a memory
+cost rather than a cost of determinism, and it is now roughly halved.
+
+What remains is the fixed 32-row tile: at M=1 the kernel dequantises a 32-row-wide
+slab of weight to use one row of it. That is deliberate, and it is the same
+trade-off as the decode GEMM below.
 
 ## Attention microbenchmark — float16
 
@@ -133,61 +139,89 @@ Stock `mx.fast.scaled_dot_product_attention` against ours.
 
 | B × H/Hkv × qL × N | role | stock ms | invariant ms | ratio |
 |---|---|---:|---:|---:|
-| 1 × 16/8 × 1 × 512 | decode, 512 ctx | 0.222 | 0.235 | 1.06x |
-| 1 × 16/8 × 1 × 2048 | decode, 2k ctx | 0.311 | 0.328 | 1.06x |
-| 1 × 16/8 × 1 × 8192 | decode, 8k ctx | 0.668 | 0.665 | 0.98x |
-| 1 × 16/8 × 1 × 32768 | decode, 32k ctx | 1.670 | 1.639 | 0.97x |
-| 8 × 16/8 × 1 × 2048 | decode, batch 8 | 0.949 | 0.944 | 0.99x |
-| 32 × 16/8 × 1 × 2048 | decode, batch 32 | 2.990 | 3.081 | 1.04x |
-| 1 × 16/8 × 8 × 2048 | chunked prefill, 8 queries | 0.468 | 0.491 | 1.06x |
-| 1 × 16/8 × 128 × 128 | prefill 128 | 0.266 | 0.882 | 3.27x |
-| 1 × 16/8 × 512 × 512 | prefill 512 | 0.959 | 4.699 | 4.92x |
+| 1 × 16/8 × 1 × 512 | decode, 512 ctx | 0.235 | 0.245 | 1.04x |
+| 1 × 16/8 × 1 × 2048 | decode, 2k ctx | 0.306 | 0.321 | 1.05x |
+| 1 × 16/8 × 1 × 8192 | decode, 8k ctx | 0.642 | 0.635 | 1.02x |
+| 1 × 16/8 × 1 × 32768 | decode, 32k ctx | 1.619 | 1.623 | 0.99x |
+| 8 × 16/8 × 1 × 2048 | decode, batch 8 | 0.926 | 0.938 | 1.01x |
+| 32 × 16/8 × 1 × 2048 | decode, batch 32 | 2.760 | 2.770 | 1.00x |
+| 1 × 16/8 × 8 × 2048 | chunked prefill, 8 queries | 0.465 | 0.483 | 1.05x |
+| 1 × 16/8 × 128 × 128 | prefill 128 | 0.284 | 0.845 | 2.95x |
+| 1 × 16/8 × 512 × 512 | prefill 512 | 0.990 | 4.655 | 4.71x |
 
 **Decode attention is free.** Across single-query decode from 512 to 32768 tokens
-of context, and across batch 1 to 32, the invariant kernel is between 0.97× and
-1.06× of stock — inside the noise floor. Three of the seven decode cells are
-*faster* than stock, because forcing the single-pass path skips the two-pass
-kernel's intermediate `sums`/`maxs` buffers and its second dispatch.
+of context, and across batch 1 to 32, the invariant kernel is between 0.99× and
+1.05× of stock — inside the noise floor.
 
 That is the most useful result in this document: for the workload that determinism
 actually matters in — serving decode, where a user's reply must not depend on who
-else is on the box — attention invariance costs nothing measurable. The entire
-end-to-end cost is the GEMM.
+else is on the box — attention invariance costs nothing measurable.
+
+Attention sinks are supported as of v0.2 and are bitwise identical to stock MLX's
+single-pass path, so the numbers above apply unchanged to sink models.
 
 ## Attention microbenchmark — bfloat16
 
 | B × H/Hkv × qL × N | role | stock ms | invariant ms | ratio |
 |---|---|---:|---:|---:|
-| 1 × 16/8 × 1 × 512 | decode, 512 ctx | 0.250 | 0.237 | 0.91x |
-| 1 × 16/8 × 1 × 2048 | decode, 2k ctx | 0.326 | 0.650 | 2.13x |
-| 1 × 16/8 × 1 × 8192 | decode, 8k ctx | 0.969 | 0.913 | 0.97x |
-| 1 × 16/8 × 1 × 32768 | decode, 32k ctx | 2.344 | 2.389 | 0.99x |
-| 8 × 16/8 × 1 × 2048 | decode, batch 8 | 1.140 | 1.493 | 1.21x |
-| 32 × 16/8 × 1 × 2048 | decode, batch 32 | 4.242 | 4.408 | 1.02x |
-| 1 × 16/8 × 8 × 2048 | chunked prefill, 8 queries | 0.813 | 0.993 | 1.57x |
-| 1 × 16/8 × 128 × 128 | prefill 128 | 0.349 | 1.000 | 2.38x |
-| 1 × 16/8 × 512 × 512 | prefill 512 | 1.121 | 5.446 | 4.86x |
+| 1 × 16/8 × 1 × 512 | decode, 512 ctx | 0.233 | 0.243 | 1.05x |
+| 1 × 16/8 × 1 × 2048 | decode, 2k ctx | 0.297 | 0.314 | 1.05x |
+| 1 × 16/8 × 1 × 8192 | decode, 8k ctx | 0.663 | 0.623 | 0.93x |
+| 1 × 16/8 × 1 × 32768 | decode, 32k ctx | 1.639 | 1.635 | 1.00x |
+| 8 × 16/8 × 1 × 2048 | decode, batch 8 | 0.945 | 0.939 | 1.01x |
+| 32 × 16/8 × 1 × 2048 | decode, batch 32 | 2.757 | 2.774 | 1.01x |
+| 1 × 16/8 × 8 × 2048 | chunked prefill, 8 queries | 0.466 | 0.485 | 1.04x |
+| 1 × 16/8 × 128 × 128 | prefill 128 | 0.276 | 0.839 | 3.04x |
+| 1 × 16/8 × 512 × 512 | prefill 512 | 0.980 | 4.657 | 4.78x |
+
+The bfloat16 sweep now tracks float16 to within a few percent everywhere except the
+smallest decode cell. v0.1's bfloat16 table had a visibly noisy outlier (2.13× in a
+cell whose neighbours read 0.97×); that was thermal, and re-running on a cold
+machine removed it.
 
 ## Where the cost comes from
 
-**Prefill GEMM, ~2.6×.** This kernel is a plain shared-memory tiled GEMM with a
-4×4 register tile and scalar FMAs. MLX's `steel_gemm` uses `simdgroup_matrix`
-hardware instructions. That is the entire gap, and it is not inherent to
-invariance: a simdgroup-matrix kernel with a fixed tile and a single threadgroup
-owning K would be just as invariant and much faster. It is unwritten work, not a
-law of physics. See ROADMAP.md.
+**Prefill GEMM, ~1.95×.** The kernel is now `simdgroup_multiply_accumulate` over
+8×8 fragments with a fixed 32×32×16 tile, four simdgroups to a threadgroup. At
+512×4096×4096 fp16 that is 1.7 TFLOP/s against stock's 3.5.
 
-**Decode GEMM, ~2.0×.** At M=1 the fixed 32-row tile does 32× more arithmetic than
-necessary, but decode is memory-bound on streaming the weights, so the observed
-penalty is 2× rather than 32×. Keeping the tile fixed is deliberate: choosing a
-narrower tile for small M is exactly the shape-dependent dispatch that Phase 0
-identified as the root cause of the bug.
+The remaining gap is *not* tile size, which was the obvious suspect. Sweeping the
+tile as a fixed compile-time constant (so every candidate is equally invariant):
 
-**Prefill attention, 3.3–4.9×.** The invariant kernel is a *vector* attention
-kernel — one threadgroup per query row, walking the whole key sequence. MLX routes
-prefill to `steel_attention`, which tiles queries and keys together and reuses each
-key block across many queries. Using a vector kernel for 512 queries throws that
-reuse away. Also fixable and also unwritten.
+| tile | decode 1×4096×4096 | prefill 512×4096×4096 |
+|---|---:|---:|
+| 32×32×16, 2×2 simdgroups | **1.66x** | **2.01x** |
+| 64×32×16 | 2.47x | — |
+| 64×64×16 | 3.02x | 2.50x |
+| 64×64×32 | 3.85x | — |
+
+32×32×16 wins on both ends, so there is no prefill/decode tension to resolve here
+and nothing to gain by dispatching on M. What is left is that the tile loop has no
+double buffering: every threadgroup stalls on its global loads before each MMA
+block instead of prefetching the next tile behind the current one. That is the next
+lever, and it is unwritten. See ROADMAP.md.
+
+One measurement worth keeping: the `unroll(full)` pragmas on the fragment loops are
+load-bearing, not decoration. Without them the compiler spills the 8×8 accumulators
+to thread memory and the 64×64 tile goes from 2.86× to 11× — worse than the scalar
+FMA kernel it replaced.
+
+**Decode GEMM, 1.6–1.8×.** At M=1 the fixed 32-row tile does 32× more arithmetic
+than necessary, but decode is memory-bound on streaming the weights, so the
+observed penalty is under 2× rather than 32×.
+
+**Prefill attention, 3.0–4.8×.** The invariant kernel is a *vector* attention
+kernel: one threadgroup per query row, walking the whole key sequence. It therefore
+re-reads K and V once per query row. Measured, on 1×32/8×512×4096 fp16:
+
+| | K/V bytes issued | time | effective load rate |
+|---|---:|---:|---:|
+| this library | 34.4 GB | 53.5 ms | 642 GB/s |
+| `steel_attention` | 0.017 GB | 10.6 ms | — |
+
+We are already saturating the cache hierarchy at 642 GB/s; the 5× gap is entirely
+redundant traffic, not slow arithmetic. See ROADMAP.md for why the obvious fix
+(blocking query rows together) was measured and rejected.
 
 **Decode attention, ~1.0×.** Same structure as MLX's own single-pass kernel, so
 there is nothing to lose.
@@ -198,17 +232,16 @@ there is nothing to lose.
 |---|---|---:|
 | Thinking Machines `batch_invariant_ops` (vLLM, Qwen3-8B, H100) | serving | ~61.5% |
 | SGLang deterministic mode | serving | ~34.35% |
-| **this library, decode** (M4, 0.94B fp16) | decode | **59.0%** |
-| **this library, prefill** (M4, 0.94B fp16) | prefill | **65.2%** |
+| **this library, decode** (M4, 0.94B fp16) | decode | **49.7%** |
+| **this library, prefill** (M4, 0.94B fp16) | prefill | **53.9%** |
 
-Comparable in magnitude to Thinking Machines' unoptimised first pass, and worse
-than SGLang's tuned one — which is the expected place for a from-scratch kernel to
-land. The comparison is directional only: different hardware, different model,
-different framework, and their percentages are measured on a full serving stack
-under load rather than a single-stream decode loop. It is offered to answer "is
-this in the normal range for a determinism tax?" (yes) and not as a benchmark
-result against those projects.
+Now between Thinking Machines' unoptimised first pass and SGLang's tuned one, where
+v0.1 was worse than both. The comparison is directional only: different hardware,
+different model, different framework, and their percentages are measured on a full
+serving stack under load rather than a single-stream decode loop. It is offered to
+answer "is this in the normal range for a determinism tax?" (yes) and not as a
+benchmark result against those projects.
 
 The honest summary: **the tax on the part that matters — decode attention — is
-zero, and the rest of the tax is unwritten optimisation, not a cost of
-determinism.**
+zero, small-batch GEMM is now free too, and what remains is the price of refusing
+to pick a kernel based on the shape of the batch.**

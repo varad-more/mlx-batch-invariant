@@ -1,0 +1,305 @@
+[
+ {
+  "kind": "gemm",
+  "dtype": "mlx.core.float16",
+  "M": 1,
+  "K": 2048,
+  "N": 2048,
+  "role": "o_proj, decode",
+  "stock_ms": 0.32233333331532776,
+  "bi_ms": 0.6589446663080404,
+  "ratio": 1.8277516763136445
+ },
+ {
+  "kind": "gemm",
+  "dtype": "mlx.core.float16",
+  "M": 1,
+  "K": 2048,
+  "N": 12288,
+  "role": "gate+up, decode",
+  "stock_ms": 0.808860999920095,
+  "bi_ms": 1.2940833330503665,
+  "ratio": 1.5983184561752135
+ },
+ {
+  "kind": "gemm",
+  "dtype": "mlx.core.float16",
+  "M": 1,
+  "K": 6144,
+  "N": 2048,
+  "role": "down_proj, decode",
+  "stock_ms": 0.49552766722626984,
+  "bi_ms": 0.8843749989561426,
+  "ratio": 1.725085735417997
+ },
+ {
+  "kind": "gemm",
+  "dtype": "mlx.core.float16",
+  "M": 8,
+  "K": 2048,
+  "N": 12288,
+  "role": "gate+up, batch 8",
+  "stock_ms": 1.2533056651591323,
+  "bi_ms": 1.2431946670403704,
+  "ratio": 0.9935392191877925
+ },
+ {
+  "kind": "gemm",
+  "dtype": "mlx.core.float16",
+  "M": 32,
+  "K": 2048,
+  "N": 12288,
+  "role": "gate+up, batch 32",
+  "stock_ms": 1.2997640005778521,
+  "bi_ms": 1.3045969996407318,
+  "ratio": 0.9985234190802978
+ },
+ {
+  "kind": "gemm",
+  "dtype": "mlx.core.float16",
+  "M": 128,
+  "K": 2048,
+  "N": 12288,
+  "role": "gate+up, batch 128",
+  "stock_ms": 2.1419999999731467,
+  "bi_ms": 3.9080140001412174,
+  "ratio": 1.8208904450762493
+ },
+ {
+  "kind": "gemm",
+  "dtype": "mlx.core.float16",
+  "M": 512,
+  "K": 2048,
+  "N": 12288,
+  "role": "gate+up, prefill 512",
+  "stock_ms": 7.360972333117388,
+  "bi_ms": 14.516430334576095,
+  "ratio": 1.971489998381254
+ },
+ {
+  "kind": "gemm",
+  "dtype": "mlx.core.float16",
+  "M": 2048,
+  "K": 2048,
+  "N": 2048,
+  "role": "o_proj, prefill 2048",
+  "stock_ms": 5.018083332591535,
+  "bi_ms": 9.874750001472421,
+  "ratio": 1.9705208260908005
+ },
+ {
+  "kind": "sdpa",
+  "dtype": "mlx.core.float16",
+  "B": 1,
+  "qL": 1,
+  "N": 512,
+  "role": "decode, 512 ctx",
+  "stock_ms": 0.23486099962610751,
+  "bi_ms": 0.2453333339265858,
+  "ratio": 1.043843244567645
+ },
+ {
+  "kind": "sdpa",
+  "dtype": "mlx.core.float16",
+  "B": 1,
+  "qL": 1,
+  "N": 2048,
+  "role": "decode, 2k ctx",
+  "stock_ms": 0.3063609983655624,
+  "bi_ms": 0.32066666608443484,
+  "ratio": 1.0474706817896582
+ },
+ {
+  "kind": "sdpa",
+  "dtype": "mlx.core.float16",
+  "B": 1,
+  "qL": 1,
+  "N": 8192,
+  "role": "decode, 8k ctx",
+  "stock_ms": 0.642402665107511,
+  "bi_ms": 0.6346113320129613,
+  "ratio": 1.019128573525977
+ },
+ {
+  "kind": "sdpa",
+  "dtype": "mlx.core.float16",
+  "B": 1,
+  "qL": 1,
+  "N": 32768,
+  "role": "decode, 32k ctx",
+  "stock_ms": 1.6187640018567133,
+  "bi_ms": 1.623389000693957,
+  "ratio": 0.9940967819681464
+ },
+ {
+  "kind": "sdpa",
+  "dtype": "mlx.core.float16",
+  "B": 8,
+  "qL": 1,
+  "N": 2048,
+  "role": "decode, batch 8",
+  "stock_ms": 0.9256943352132415,
+  "bi_ms": 0.937944331478017,
+  "ratio": 1.0094302073380335
+ },
+ {
+  "kind": "sdpa",
+  "dtype": "mlx.core.float16",
+  "B": 32,
+  "qL": 1,
+  "N": 2048,
+  "role": "decode, batch 32",
+  "stock_ms": 2.7603053337467522,
+  "bi_ms": 2.7696249987153956,
+  "ratio": 1.0013090575378665
+ },
+ {
+  "kind": "sdpa",
+  "dtype": "mlx.core.float16",
+  "B": 1,
+  "qL": 8,
+  "N": 2048,
+  "role": "chunked prefill, 8 queries",
+  "stock_ms": 0.46530566760338843,
+  "bi_ms": 0.4832779983795869,
+  "ratio": 1.0537441088877462
+ },
+ {
+  "kind": "sdpa",
+  "dtype": "mlx.core.float16",
+  "B": 1,
+  "qL": 128,
+  "N": 128,
+  "role": "prefill 128",
+  "stock_ms": 0.28401366823042434,
+  "bi_ms": 0.8450280001852661,
+  "ratio": 2.954323343402816
+ },
+ {
+  "kind": "sdpa",
+  "dtype": "mlx.core.float16",
+  "B": 1,
+  "qL": 512,
+  "N": 512,
+  "role": "prefill 512",
+  "stock_ms": 0.9903750008864638,
+  "bi_ms": 4.654735998580388,
+  "ratio": 4.714836894223513
+ },
+ {
+  "kind": "quant",
+  "M": 1,
+  "K": 2048,
+  "N": 2048,
+  "role": "o_proj, decode",
+  "stock_ms": 0.2249723329441622,
+  "invariant_ms": 0.4670970010920428,
+  "ratio": 2.0578456403018865
+ },
+ {
+  "kind": "quant",
+  "M": 1,
+  "K": 2048,
+  "N": 12288,
+  "role": "gate+up, decode",
+  "stock_ms": 0.38229166724098224,
+  "invariant_ms": 1.5035556668105226,
+  "ratio": 3.902806118746843
+ },
+ {
+  "kind": "quant",
+  "M": 1,
+  "K": 6144,
+  "N": 2048,
+  "role": "down_proj, decode",
+  "stock_ms": 0.29816666695599753,
+  "invariant_ms": 1.230139001563657,
+  "ratio": 4.116389458450487
+ },
+ {
+  "kind": "quant",
+  "M": 256,
+  "K": 2048,
+  "N": 2048,
+  "role": "o_proj, prefill",
+  "stock_ms": 0.9330556664887505,
+  "invariant_ms": 1.9485000011627562,
+  "ratio": 2.1179839450541036
+ },
+ {
+  "kind": "quant",
+  "M": 256,
+  "K": 2048,
+  "N": 12288,
+  "role": "gate+up, prefill",
+  "stock_ms": 3.9060000005216957,
+  "invariant_ms": 9.796291667347154,
+  "ratio": 2.5061825645903912
+ },
+ {
+  "kind": "e2e",
+  "dtype": "mlx.core.float16",
+  "phase": "prefill 256 tok",
+  "batch": 1,
+  "layers": 16,
+  "params": 936445952,
+  "stock_s": 0.12913787500292528,
+  "bi_s": 0.28020808300061617,
+  "ratio": 2.169836564170417,
+  "cost_pct": 53.91357964408139
+ },
+ {
+  "kind": "e2e",
+  "dtype": "mlx.core.float16",
+  "phase": "decode 32 tok",
+  "batch": 1,
+  "layers": 16,
+  "params": 936445952,
+  "stock_s": 0.5970901250038878,
+  "bi_s": 1.1868403339976794,
+  "ratio": 1.9877071890779496,
+  "cost_pct": 49.690779130105355
+ },
+ {
+  "kind": "determinism",
+  "path": "stock MLX",
+  "batch": 2,
+  "differing": 25812,
+  "total": 32000
+ },
+ {
+  "kind": "determinism",
+  "path": "stock MLX",
+  "batch": 4,
+  "differing": 26399,
+  "total": 32000
+ },
+ {
+  "kind": "determinism",
+  "path": "stock MLX",
+  "batch": 8,
+  "differing": 26629,
+  "total": 32000
+ },
+ {
+  "kind": "determinism",
+  "path": "batch invariant",
+  "batch": 2,
+  "differing": 0,
+  "total": 32000
+ },
+ {
+  "kind": "determinism",
+  "path": "batch invariant",
+  "batch": 4,
+  "differing": 0,
+  "total": 32000
+ },
+ {
+  "kind": "determinism",
+  "path": "batch invariant",
+  "batch": 8,
+  "differing": 0,
+  "total": 32000
+ }
+]

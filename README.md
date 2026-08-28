@@ -141,24 +141,26 @@ Full numbers and methodology in [BENCHMARK.md](BENCHMARK.md).
 
 | | throughput cost |
 |---|---:|
-| decode attention, 512 → 32768 ctx, batch 1 → 32 | **~0%** (0.97–1.06×) |
-| end-to-end decode, 0.94B fp16 | 59.0% |
-| end-to-end prefill 256, 0.94B fp16 | 65.2% |
+| decode attention, 512 → 32768 ctx, batch 1 → 32 | **~0%** (0.99–1.05×) |
+| GEMM at batch 8–32 | **~0%** (0.99–1.00×) |
+| end-to-end decode, 0.94B fp16 | 49.7% |
+| end-to-end prefill 256, 0.94B fp16 | 53.9% |
 
 For reference, Thinking Machines' CUDA `batch_invariant_ops` reports roughly 61.5%
 and SGLang's tuned deterministic mode roughly 34.35%. Different hardware, model and
 framework — directional only.
 
-Decode attention is free. The entire end-to-end cost is the GEMM, and it is not a
-cost of determinism: the kernel uses scalar FMAs where MLX uses `simdgroup_matrix`.
-A simdgroup-matrix kernel with the same fixed tile would be equally invariant and
-much faster. See [ROADMAP.md](ROADMAP.md).
+Decode attention is free, and so is GEMM at the small batch sizes where MLX's own
+dispatch is deciding between `gemv` and `steel_gemm`. What remains is prefill,
+where MLX tiles work across query rows and this library cannot: sharing work across
+rows of the batch is what makes a result depend on the batch. See
+[ROADMAP.md](ROADMAP.md) for what was measured and rejected there.
 
 ## Quantized models
 
-4-bit checkpoints are covered. `mx.quantized_matmul` — which is what
-`nn.QuantizedLinear` calls — is routed through dequantize-then-invariant-GEMM, so a
-real MLX checkpoint is invariant end to end:
+2, 4 and 8-bit affine checkpoints are covered. `mx.quantized_matmul` — which is
+what `nn.QuantizedLinear` calls — runs a fused invariant kernel that unpacks the
+weight inside the K loop, so a real MLX checkpoint is invariant end to end:
 
 ```
 $ .venv/bin/python bench/real_model.py     # mlx-community/Qwen1.5-0.5B-Chat-4bit
@@ -166,15 +168,22 @@ stock MLX      : B=2 113360/151936 bits, B=4 121209/151936 bits, B=8 117380/1519
 batch-invariant: B=2 0/151936 bits, B=4 0/151936 bits, B=8 0/151936 bits
 ```
 
-It costs 2.7–6.9× on the quantized layers, because the whole weight is dequantized
-on every call. That ratio is a ceiling set by an unwritten fused kernel, not by
-invariance. See [ROADMAP.md](ROADMAP.md).
+It costs 2.1–4.1× on the quantized layers. The worst cell is decode, where the
+fixed 32-row tile dequantises a slab of weight to use one row of it — a deliberate
+refusal to pick a narrower kernel for small batches, which is the bug this library
+exists to prevent. See [ROADMAP.md](ROADMAP.md).
 
 ## Limitations
 
-Attention sinks are unsupported. Head dimensions must be multiples of 32. Forward
-pass only, no gradients. M5 Neural Accelerator / Metal 4 tensor paths are
-permanently out of scope and no number here assumes them.
+Head dimensions must be multiples of 32. 3, 5 and 6-bit quantized weights fall
+back to stock MLX (they use a different packing), and under `strict=True` they
+raise rather than silently returning a variant result. Prefill attention is
+3.0–4.8× slower than `steel_attention`. Forward pass only, no gradients. M5 Neural
+Accelerator / Metal 4 tensor paths are permanently out of scope and no number here
+assumes them.
+
+Attention sinks *are* supported as of v0.2, and are bitwise identical to stock
+MLX's single-pass path.
 
 ## Prior art
 

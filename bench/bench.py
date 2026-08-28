@@ -247,10 +247,10 @@ def determinism(dtype, out):
 
 
 def quant(dtype, out):
-    """Stock fused quantized_matmul vs dequantize-then-invariant-GEMM.
+    """Stock fused quantized_matmul vs the fused invariant quantized kernel.
 
-    This is the most expensive thing the library does: it materialises an fp16 copy
-    of the weight on every call, so the ratio here is a ceiling, not a fixed cost.
+    Both unpack the weight inside the K loop; what differs is the tile. Decode is
+    the worst cell because a fixed 32-row tile dequantises a slab to use one row.
     """
     import mlx.nn as nn
 
