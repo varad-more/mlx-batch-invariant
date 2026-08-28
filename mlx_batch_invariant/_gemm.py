@@ -29,7 +29,7 @@ TILE = dict(BM=BM, BN=BN, BK=BK, SG_M=SG_M, SG_N=SG_N)
 _SOURCE = """
   const int M = a_shape[0];
   const int K = a_shape[1];
-  const int N = TRANSPOSE_B ? b_shape[0] : b_shape[1];
+  const int N = __N__;
 
   constexpr int NT = SG_M * SG_N * 32;
   constexpr int WM = BM / SG_M;   // rows of the tile owned by one simdgroup
@@ -74,8 +74,7 @@ _SOURCE = """
       const int gn = col0 + c;
       float v = 0.0f;
       if (gk < K && gn < N) {
-        v = TRANSPOSE_B ? static_cast<float>(b[gn * K + gk])
-                        : static_cast<float>(b[gk * N + gn]);
+        __B_LOAD__
       }
       Bs[idx] = v;
     }
@@ -130,14 +129,52 @@ _SOURCE = """
   }
 """
 
-_KERNEL = mx.fast.metal_kernel(
-    name="bi_gemm",
-    input_names=["a", "b", "bias", "coef"],
-    output_names=["out"],
-    source=_SOURCE,
-    header="#include <metal_simdgroup>\n#include <metal_simdgroup_matrix>\n",
-    ensure_row_contiguous=True,
+_HEADER = "#include <metal_simdgroup>\n#include <metal_simdgroup_matrix>\n"
+
+
+def _kernel(name, inputs, n_expr, b_load):
+    """The tile loop above, with the B tile filled in by ``b_load``.
+
+    Only where B comes from differs between the float and the quantized kernel, so
+    only that is substituted. Everything the invariance argument rests on -- the tile
+    constants, the k0/kk order, the MMA shape -- is shared source.
+    """
+    return mx.fast.metal_kernel(
+        name=name,
+        input_names=inputs,
+        output_names=["out"],
+        source=_SOURCE.replace("__N__", n_expr).replace("__B_LOAD__", b_load),
+        header=_HEADER,
+        ensure_row_contiguous=True,
+    )
+
+
+_KERNEL = _kernel(
+    "bi_gemm", ["a", "b", "bias", "coef"],
+    "TRANSPOSE_B ? b_shape[0] : b_shape[1]",
+    """v = TRANSPOSE_B ? static_cast<float>(b[gn * K + gk])
+                        : static_cast<float>(b[gk * N + gn]);""",
 )
+
+# Affine dequantisation, verified against mx.dequantize on this MLX: element gk of
+# row gn is packed little-endian into a uint32 word, and its group's scale and bias
+# are per-weight, not per-batch -- so doing it here rather than in a separate pass
+# over the whole matrix changes the cost, not the invariance argument.
+_QKERNEL = _kernel(
+    "bi_qgemm", ["a", "b", "scales", "qbias", "bias", "coef"],
+    "b_shape[0]",
+    """constexpr int PACK = 32 / BITS;
+        constexpr uint MASK = (1u << BITS) - 1u;
+        const uint word = b[gn * (K / PACK) + gk / PACK];
+        const uint qv = (word >> (BITS * (gk % PACK))) & MASK;
+        const int gi = gn * (K / GROUP) + gk / GROUP;
+        v = static_cast<float>(scales[gi]) * static_cast<float>(qv)
+          + static_cast<float>(qbias[gi]);""",
+)
+
+# 32 / bits is the packing only where it divides exactly; 3, 5 and 6 bit affine
+# weights are laid out differently and are left to stock MLX.
+QUANT_BITS = (2, 4, 8)
 
 # Anything <= 8 elements would be passed in the constant address space, which changes
 # the pointer type of the placeholder between launches.
@@ -201,3 +238,48 @@ def linear(x, w, bias=None):
     Takes the weight in its stored layout so no transposed copy is made.
     """
     return _gemm(x, w, bias, transpose_b=True)
+
+
+def quantized_linear(x, w, scales, qbias, group_size, bits):
+    """``x @ dequantize(w).T`` for affine-quantized w, without materialising it.
+
+    ``w`` is the packed (N, K * bits / 32) uint32 weight and ``scales``/``qbias`` are
+    its (N, K / group_size) affine parameters -- the ``mx.quantized_matmul``
+    convention with ``transpose=True``.
+    """
+    global _NO_BIAS
+    if bits not in QUANT_BITS:
+        raise ValueError("bits must be one of %s, got %r" % (QUANT_BITS, bits))
+    if x.ndim < 2 or w.ndim != 2 or scales.ndim != 2 or qbias.ndim != 2:
+        raise ValueError("expected x.ndim >= 2 and 2-d w, scales and biases")
+
+    lead, K = x.shape[:-1], x.shape[-1]
+    M = 1
+    for d in lead:
+        M *= d
+    N = w.shape[0]
+    if w.shape[1] * (32 // bits) != K:
+        raise ValueError(
+            "packed weight %s does not describe %d columns at %d bits"
+            % (tuple(w.shape), K, bits))
+    if K % group_size:
+        raise ValueError("group size %d does not divide K=%d" % (group_size, K))
+    if scales.shape != (N, K // group_size) or qbias.shape != scales.shape:
+        raise ValueError(
+            "scales/biases must have shape (%d, %d), got %s and %s"
+            % (N, K // group_size, tuple(scales.shape), tuple(qbias.shape)))
+
+    if _NO_BIAS is None or _NO_BIAS.dtype != x.dtype:
+        _NO_BIAS = mx.zeros((_PAD,), dtype=x.dtype)
+    coef = mx.array([1.0, 1.0] + [0.0] * (_PAD - 2), dtype=mx.float32)
+    out = _QKERNEL(
+        inputs=[x.reshape(M, K), w, scales, qbias, _NO_BIAS, coef],
+        template=[("T", x.dtype), ("BM", BM), ("BN", BN), ("BK", BK),
+                  ("SG_M", SG_M), ("SG_N", SG_N),
+                  ("BITS", bits), ("GROUP", group_size), ("HAS_BIAS", 0)],
+        grid=((N + BN - 1) // BN * 32, (M + BM - 1) // BM * NSG, 1),
+        threadgroup=(32, NSG, 1),
+        output_shapes=[(M, N)],
+        output_dtypes=[x.dtype],
+    )[0]
+    return out.reshape(*lead, N)

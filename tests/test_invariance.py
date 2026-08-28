@@ -490,8 +490,28 @@ class TestQuantizedInvariance(unittest.TestCase):
                 else:
                     self.assertEqual(int((got != base).sum()), 0, "quantized 3D B=%d" % B)
 
+    def test_fused_dequant_matches_mx_dequantize(self):
+        """The kernel unpacks the affine layout by hand, so a wrong shift would be
+        silent everywhere except here: compare against mx.dequantize itself."""
+        for nbits in bi.QUANT_BITS:
+            for gs in (32, 64, 128):
+                q, s, b = mx.quantize(rn((256, 512), mx.float16, 50),
+                                      group_size=gs, bits=nbits, mode="affine")
+                x = rn((5, 512), mx.float16, 49)
+                mx.eval(x, q, s, b)
+                w = mx.dequantize(q, scales=s, biases=b, group_size=gs, bits=nbits,
+                                  mode="affine").astype(mx.float32)
+                exact = np.array(x.astype(mx.float32)).astype(np.float64) @ \
+                    np.array(w).astype(np.float64).T
+                got = np.array(
+                    bi.quantized_linear(x, q, s, b, gs, nbits).astype(mx.float32)
+                ).astype(np.float64)
+                err = np.abs(got - exact).max() / max(np.abs(exact).max(), 1e-9)
+                self.assertLess(err, 5e-3,
+                                "bits=%d group_size=%d rel err %g" % (nbits, gs, err))
+
     def test_quantized_accuracy_matches_stock(self):
-        """Dequantize-then-invariant-GEMM must not be less accurate than the fused
+        """The fused invariant kernel must not be less accurate than the fused
         stock kernel, measured against a float32 reference on the same weights."""
         q = self._layer(512, 1024, False, 4, mx.float16)
         x = rn((4, 512), mx.float16, 48)

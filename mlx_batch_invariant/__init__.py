@@ -18,9 +18,11 @@ import contextlib
 import mlx.core as mx
 
 from ._attention import scaled_dot_product_attention
-from ._gemm import TILE, addmm, linear, matmul
+from ._gemm import QUANT_BITS, TILE, addmm, linear, matmul, quantized_linear
 
 __all__ = [
+    "quantized_linear",
+    "QUANT_BITS",
     "matmul",
     "addmm",
     "linear",
@@ -105,18 +107,19 @@ def batch_invariant_mode(strict=True):
 
     def bi_quantized_matmul(x, w, scales, biases=None, transpose=True,
                             group_size=None, bits=None, mode="affine", *, stream=None):
-        if not transpose or x.ndim < 2:
+        if transpose and x.ndim >= 2 and w.ndim == 2 and scales.ndim == 2:
+            # Both are optional in MLX's signature; the packed shapes fix them.
+            K = x.shape[-1]
+            bits = 32 * w.shape[1] // K if bits is None else bits
+            group_size = K // scales.shape[1] if group_size is None else group_size
+        if (not transpose or x.ndim < 2 or mode != "affine" or biases is None
+                or bits not in QUANT_BITS):
             return _unsupported(
-                "quantized_matmul with transpose=%s and x.ndim=%d" % (transpose, x.ndim),
+                "quantized_matmul with transpose=%s x.ndim=%d mode=%s bits=%s"
+                % (transpose, x.ndim, mode, bits),
                 strict, saved["quantized_matmul"], x, w, scales, biases, transpose,
                 group_size, bits, mode, stream=stream)
-        # ponytail: dequantize the whole weight per call. Correct and invariant --
-        # dequantization is elementwise, so it cannot depend on the batch -- but it
-        # materialises an fp16 copy of every weight it touches. A fused invariant
-        # quantized kernel is ROADMAP.md item 3.
-        wd = mx.dequantize(w, scales=scales, biases=biases, group_size=group_size,
-                           bits=bits, mode=mode, dtype=x.dtype)
-        return linear(x, wd)
+        return quantized_linear(x, w, scales, biases, group_size, bits)
 
     def bi_linear_call(self, x):
         w = self["weight"]
