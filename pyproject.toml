@@ -7,7 +7,7 @@ name = "mlx-batch-invariant"
 version = "0.1.0"
 description = "Batch-invariant, bitwise-deterministic kernels for MLX on Apple Silicon"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Varad More" }]
 keywords = ["mlx", "apple-silicon", "metal", "determinism", "batch-invariance", "llm"]

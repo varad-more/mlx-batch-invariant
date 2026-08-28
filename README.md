@@ -1,5 +1,7 @@
 # mlx-batch-invariant
 
+[![ci](https://github.com/varad-more/mlx-batch-invariant/actions/workflows/ci.yml/badge.svg)](https://github.com/varad-more/mlx-batch-invariant/actions/workflows/ci.yml)
+
 Batch-invariant, bitwise-deterministic kernels for [MLX](https://github.com/ml-explore/mlx)
 on Apple Silicon.
 
