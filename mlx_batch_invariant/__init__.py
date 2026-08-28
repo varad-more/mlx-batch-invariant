@@ -98,12 +98,13 @@ def batch_invariant_mode(strict=True):
         return addmm(c, a, b, alpha, beta)
 
     def bi_sdpa(q, k, v, *, scale, mask=None, sinks=None, stream=None):
-        if sinks is not None or q.ndim != 4 or q.shape[-1] % 32 or v.shape[-1] % 32:
+        if q.ndim != 4 or q.shape[-1] % 32 or v.shape[-1] % 32:
             return _unsupported(
-                "attention with sinks or head dim %s" % (q.shape[-1],),
+                "attention with head dim %s" % (q.shape[-1],),
                 strict, saved["sdpa"], q, k, v,
                 scale=scale, mask=mask, sinks=sinks, stream=stream)
-        return scaled_dot_product_attention(q, k, v, scale=scale, mask=mask)
+        return scaled_dot_product_attention(q, k, v, scale=scale, mask=mask,
+                                            sinks=sinks)
 
     def bi_quantized_matmul(x, w, scales, biases=None, transpose=True,
                             group_size=None, bits=None, mode="affine", *, stream=None):

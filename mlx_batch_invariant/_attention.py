@@ -77,6 +77,13 @@ _SOURCE = """
   // the running max is subtracted from itself.
   U max_score = -3.40282347e+38f;
   U sum_exp_score = 0;
+  if (HAS_SINKS && sg == 0) {
+    // The sink is an extra logit with no value vector: it enters the running max
+    // and the denominator, never the numerator. Seeding it in one fixed simdgroup
+    // keeps the combine below unchanged, which is how MLX does it too.
+    max_score = static_cast<U>(sinks[h]);
+    sum_exp_score = 1;
+  }
 
   // Fixed 32-stride walk over the whole key sequence. No split, no second pass.
   for (int i = sg; i < N; i += BN) {
@@ -143,7 +150,7 @@ _SOURCE = """
 
 _KERNEL = mx.fast.metal_kernel(
     name="bi_sdpa",
-    input_names=["q", "k", "v", "mask", "mstride", "scale"],
+    input_names=["q", "k", "v", "mask", "mstride", "scale", "sinks"],
     output_names=["out"],
     source=_SOURCE,
     header="#include <metal_simdgroup>\n",
@@ -195,11 +202,12 @@ def _mask_args(mask, B, H, qL, N, dtype):
     return m, strides, 2
 
 
-def scaled_dot_product_attention(q, k, v, *, scale=None, mask=None):
+def scaled_dot_product_attention(q, k, v, *, scale=None, mask=None, sinks=None):
     """Bitwise-invariant SDPA. ``q`` is (B, H, L, D), ``k``/``v`` are (B, Hkv, N, ...).
 
     ``mask`` may be ``None``, ``"causal"``, or an additive/boolean array
-    broadcastable over the batch, head and query dimensions.
+    broadcastable over the batch, head and query dimensions.  ``sinks`` is an
+    optional per-query-head logit of shape ``(H,)``, as in ``mx.fast.*``.
     """
     if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
         raise ValueError("q, k and v must be 4-dimensional (B, H, L, D)")
@@ -220,11 +228,21 @@ def scaled_dot_product_attention(q, k, v, *, scale=None, mask=None):
 
     scale = 1.0 / math.sqrt(D) if scale is None else float(scale)
     m, mstride, mode = _mask_args(mask, B, H, qL, N, q.dtype)
+    if sinks is None:
+        sink_arr, has_sinks = _dummy(q.dtype), 0
+    elif sinks.shape != (H,):
+        raise ValueError("sinks must have shape (%d,), got %s" % (H, sinks.shape))
+    else:
+        # Same constant-address-space trap as the mask dummy: a short (H,) array
+        # would change the pointer type of this argument between launches.
+        sink_arr = mx.concatenate([sinks.astype(q.dtype), _dummy(q.dtype)])
+        has_sinks = 1
 
     return _KERNEL(
-        inputs=[q, k, v, m, mstride, mx.full((_PAD,), scale, dtype=mx.float32)],
+        inputs=[q, k, v, m, mstride, mx.full((_PAD,), scale, dtype=mx.float32),
+                sink_arr],
         template=[("T", q.dtype), ("D", D), ("V", V), ("BN", BN), ("BD", BD),
-                  ("MASK_MODE", mode)],
+                  ("MASK_MODE", mode), ("HAS_SINKS", has_sinks)],
         grid=(BD, BN * qL, B * H),
         threadgroup=(BD, BN, 1),
         output_shapes=[(B, H, qL, V)],

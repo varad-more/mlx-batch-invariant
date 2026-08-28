@@ -320,6 +320,50 @@ class TestAttentionInvariance(unittest.TestCase):
                                          "sdpa %s %s qL=%d" % (label, dname, qL))
 
 
+class TestAttentionSinks(unittest.TestCase):
+    """Sinks are what gpt-oss-style models use; without them the library does not
+    apply to that family at all."""
+
+    def test_sinks_are_query_length_invariant(self):
+        H, Hkv, N, D = 32, 8, 1024, 128
+        for dname, dtype in DTYPES:
+            k, v = rn((1, Hkv, N, D), dtype, 71), rn((1, Hkv, N, D), dtype, 72)
+            qf = rn((1, H, 17, D), dtype, 73)
+            sinks = rn((H,), dtype, 74)
+            mx.eval(k, v, qf, sinks)
+            base = None
+            for qL in (1, 2, 3, 7, 8, 9, 16, 17):
+                q = mx.contiguous(qf[:, :, 17 - qL:, :])
+                y = bi.scaled_dot_product_attention(q, k, v, sinks=sinks)
+                mx.eval(y)
+                got = bits(mx.contiguous(y[:, :, -1, :]))
+                if base is None:
+                    base = got
+                else:
+                    self.assertEqual(int((got != base).sum()), 0,
+                                     "sinks %s qL=%d" % (dname, qL))
+
+    def test_sinks_change_the_answer(self):
+        """Guard against the sink being silently ignored, which would make the
+        invariance test above pass for the wrong reason."""
+        H, Hkv, N, D = 8, 8, 256, 64
+        q, k = rn((1, H, 1, D), mx.float32, 75), rn((1, Hkv, N, D), mx.float32, 76)
+        v = rn((1, Hkv, N, D), mx.float32, 77)
+        sinks = mx.full((H,), 10.0, dtype=mx.float32)  # dominates the denominator
+        mx.eval(q, k, v, sinks)
+        without = bi.scaled_dot_product_attention(q, k, v)
+        with_ = bi.scaled_dot_product_attention(q, k, v, sinks=sinks)
+        mx.eval(without, with_)
+        self.assertGreater(int((bits(without) != bits(with_)).sum()), 0)
+
+    def test_wrong_sink_shape_is_rejected(self):
+        q, k = rn((1, 8, 1, 64), mx.float32, 78), rn((1, 8, 32, 64), mx.float32, 79)
+        v = rn((1, 8, 32, 64), mx.float32, 80)
+        mx.eval(q, k, v)
+        with self.assertRaises(ValueError):
+            bi.scaled_dot_product_attention(q, k, v, sinks=mx.zeros((4,)))
+
+
 class TestAttentionMatchesMLX(unittest.TestCase):
     """Where MLX takes its single-pass vector path this kernel is a bit-for-bit
     replacement, so adopting it costs no accuracy at all in the common case."""
@@ -341,6 +385,25 @@ class TestAttentionMatchesMLX(unittest.TestCase):
                     mx.eval(ref, ours)
                     self.assertEqual(int((bits(ref) != bits(ours)).sum()), 0,
                                      "%s %s H=%d/%d qL=%d N=%d" % (label, dname, H, Hkv, qL, N))
+
+    def test_bitwise_identical_with_sinks(self):
+        """A sink is one extra logit in the denominator, seeded in simdgroup 0 --
+        the same place MLX seeds it, so the single-pass case must still match."""
+        import math
+        for dname, dtype in DTYPES:
+            for H, Hkv, qL, N, D in ((8, 8, 1, 512, 128), (32, 8, 4, 1024, 128),
+                                     (4, 4, 2, 256, 64)):
+                q = rn((1, H, qL, D), dtype, 45)
+                k = rn((1, Hkv, N, D), dtype, 46)
+                v = rn((1, Hkv, N, D), dtype, 47)
+                sinks = rn((H,), dtype, 48)
+                mx.eval(q, k, v, sinks)
+                ref = mx.fast.scaled_dot_product_attention(
+                    q, k, v, scale=1.0 / math.sqrt(D), sinks=sinks)
+                ours = bi.scaled_dot_product_attention(q, k, v, sinks=sinks)
+                mx.eval(ref, ours)
+                self.assertEqual(int((bits(ref) != bits(ours)).sum()), 0,
+                                 "sinks %s H=%d/%d qL=%d N=%d" % (dname, H, Hkv, qL, N))
 
     def test_accuracy_against_float64(self):
         import math
