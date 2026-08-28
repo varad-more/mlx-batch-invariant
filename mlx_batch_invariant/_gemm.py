@@ -8,38 +8,54 @@ function of M.  Each of those kernels is itself bitwise stable as M varies.
 So the fix is one kernel that is always used.  Every threadgroup owns the whole
 reduction over K, the tile shape is a compile-time constant, and nothing about the
 launch depends on M except how many tiles are launched.
+
+The reduction runs on `simdgroup_multiply_accumulate` over 8x8 fragments.  Nothing
+about invariance requires the slow instruction -- an output element accumulates over
+`k0` ascending and then `kk` ascending, a fixed sequence of fixed-width MMAs, for
+every M -- so v0.1's scalar-FMA inner loop was simply the shortest correct thing to
+write first.  The fragment loops carry `unroll(full)` because without it the
+compiler spills the accumulators to thread memory and the MMA loses to the FMAs.
 """
 
 import mlx.core as mx
 
 # Compile-time tile. Fixed for every shape and every dtype -- deliberately not tuned
-# per input, because that is the bug this library exists to prevent.
-BM, BN, BK, TM, TN = 32, 32, 16, 4, 4
-TGX, TGY = BN // TN, BM // TM  # 8 x 8 = 64 threads per threadgroup
-TILE = dict(BM=BM, BN=BN, BK=BK, TM=TM, TN=TN)
+# per input, because that is the bug this library exists to prevent. SG_M x SG_N
+# simdgroups, so each one owns a (BM / SG_M) x (BN / SG_N) corner of the tile.
+BM, BN, BK, SG_M, SG_N = 32, 32, 16, 2, 2
+NSG = SG_M * SG_N  # 4 simdgroups = 128 threads per threadgroup
+TILE = dict(BM=BM, BN=BN, BK=BK, SG_M=SG_M, SG_N=SG_N)
 
 _SOURCE = """
   const int M = a_shape[0];
   const int K = a_shape[1];
   const int N = TRANSPOSE_B ? b_shape[0] : b_shape[1];
 
+  constexpr int NT = SG_M * SG_N * 32;
+  constexpr int WM = BM / SG_M;   // rows of the tile owned by one simdgroup
+  constexpr int WN = BN / SG_N;   // columns likewise
+  constexpr int FM = WM / 8;      // 8x8 accumulator fragments, vertically
+  constexpr int FN = WN / 8;      // ... and horizontally
+
   const uint ti = thread_index_in_threadgroup;
-  const int tx = thread_position_in_threadgroup.x;
-  const int ty = thread_position_in_threadgroup.y;
+  const uint sg = simdgroup_index_in_threadgroup;
+  const int sgm = sg / SG_N;
+  const int sgn = sg % SG_N;
   const int row0 = threadgroup_position_in_grid.y * BM;
   const int col0 = threadgroup_position_in_grid.x * BN;
 
   threadgroup float As[BM * BK];
   threadgroup float Bs[BK * BN];
+  threadgroup float Cs[BM * BN];
 
-  float acc[TM][TN];
-  for (int i = 0; i < TM; i++) {
-    for (int j = 0; j < TN; j++) {
-      acc[i][j] = 0.0f;
+  simdgroup_float8x8 acc[FM][FN];
+  #pragma clang loop unroll(full)
+  for (int i = 0; i < FM; i++) {
+    #pragma clang loop unroll(full)
+    for (int j = 0; j < FN; j++) {
+      acc[i][j] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
     }
   }
-
-  const int NT = (BM / TM) * (BN / TN);
 
   // One threadgroup, the whole reduction. The trip count depends on K alone, so the
   // summation order for a given output element is identical for every M.
@@ -65,43 +81,52 @@ _SOURCE = """
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (int kk = 0; kk < BK; kk++) {
-      float av[TM];
-      float bv[TN];
-      for (int i = 0; i < TM; i++) {
-        av[i] = As[(ty * TM + i) * BK + kk];
+    #pragma clang loop unroll(full)
+    for (int kk = 0; kk < BK; kk += 8) {
+      simdgroup_float8x8 af[FM];
+      simdgroup_float8x8 bf[FN];
+      #pragma clang loop unroll(full)
+      for (int i = 0; i < FM; i++) {
+        simdgroup_load(af[i], As + (sgm * WM + i * 8) * BK + kk, BK);
       }
-      for (int j = 0; j < TN; j++) {
-        bv[j] = Bs[kk * BN + tx * TN + j];
+      #pragma clang loop unroll(full)
+      for (int j = 0; j < FN; j++) {
+        simdgroup_load(bf[j], Bs + kk * BN + sgn * WN + j * 8, BN);
       }
-      for (int i = 0; i < TM; i++) {
-        for (int j = 0; j < TN; j++) {
-          acc[i][j] += av[i] * bv[j];
+      #pragma clang loop unroll(full)
+      for (int i = 0; i < FM; i++) {
+        #pragma clang loop unroll(full)
+        for (int j = 0; j < FN; j++) {
+          simdgroup_multiply_accumulate(acc[i][j], af[i], bf[j], acc[i][j]);
         }
       }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 
+  #pragma clang loop unroll(full)
+  for (int i = 0; i < FM; i++) {
+    #pragma clang loop unroll(full)
+    for (int j = 0; j < FN; j++) {
+      simdgroup_store(acc[i][j], Cs + (sgm * WM + i * 8) * BN + sgn * WN + j * 8, BN);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
   // Epilogue: the bias is added to the float32 accumulator and rounded once. MLX is
   // inconsistent here -- its gemv path rounds before adding, its fused path after --
   // which is a second source of batch variance in float16 and bfloat16.
-  for (int i = 0; i < TM; i++) {
-    const int gr = row0 + ty * TM + i;
-    if (gr >= M) {
+  for (int idx = ti; idx < BM * BN; idx += NT) {
+    const int gr = row0 + idx / BN;
+    const int gn = col0 + idx % BN;
+    if (gr >= M || gn >= N) {
       continue;
     }
-    for (int j = 0; j < TN; j++) {
-      const int gn = col0 + tx * TN + j;
-      if (gn >= N) {
-        continue;
-      }
-      float v = acc[i][j];
-      if (HAS_BIAS) {
-        v = coef[0] * v + coef[1] * static_cast<float>(bias[gn]);
-      }
-      out[gr * N + gn] = static_cast<T>(v);
+    float v = Cs[idx];
+    if (HAS_BIAS) {
+      v = coef[0] * v + coef[1] * static_cast<float>(bias[gn]);
     }
+    out[gr * N + gn] = static_cast<T>(v);
   }
 """
 
@@ -110,6 +135,7 @@ _KERNEL = mx.fast.metal_kernel(
     input_names=["a", "b", "bias", "coef"],
     output_names=["out"],
     source=_SOURCE,
+    header="#include <metal_simdgroup>\n#include <metal_simdgroup_matrix>\n",
     ensure_row_contiguous=True,
 )
 
@@ -144,15 +170,15 @@ def _gemm(a, b, bias, transpose_b, alpha=1.0, beta=1.0):
             raise ValueError("bias must have shape (%d,), got %s" % (N, bias.shape))
         bias_arr, has_bias = bias, 1
 
-    grid = ((N + BN - 1) // BN * TGX, (M + BM - 1) // BM * TGY, 1)
+    grid = ((N + BN - 1) // BN * 32, (M + BM - 1) // BM * NSG, 1)
     coef = mx.array([alpha, beta] + [0.0] * (_PAD - 2), dtype=mx.float32)
     out = _KERNEL(
         inputs=[a2, b, bias_arr, coef],
         template=[("T", a.dtype), ("BM", BM), ("BN", BN), ("BK", BK),
-                  ("TM", TM), ("TN", TN),
+                  ("SG_M", SG_M), ("SG_N", SG_N),
                   ("TRANSPOSE_B", int(transpose_b)), ("HAS_BIAS", has_bias)],
         grid=grid,
-        threadgroup=(TGX, TGY, 1),
+        threadgroup=(32, NSG, 1),
         output_shapes=[(M, N)],
         output_dtypes=[a.dtype],
     )[0]

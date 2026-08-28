@@ -404,7 +404,7 @@ class TestDeviceAssumptions(unittest.TestCase):
 
     def test_tile_is_not_shape_dependent(self):
         """Guard against anyone reintroducing dimension-based strategy selection."""
-        self.assertEqual(bi.TILE, dict(BM=32, BN=32, BK=16, TM=4, TN=4))
+        self.assertEqual(bi.TILE, dict(BM=32, BN=32, BK=16, SG_M=2, SG_N=2))
 
 
 if __name__ == "__main__":
