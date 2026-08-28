@@ -1,0 +1,44 @@
+[
+ {
+  "kind": "determinism",
+  "path": "stock MLX",
+  "batch": 2,
+  "differing": 26357,
+  "total": 32000
+ },
+ {
+  "kind": "determinism",
+  "path": "stock MLX",
+  "batch": 4,
+  "differing": 26385,
+  "total": 32000
+ },
+ {
+  "kind": "determinism",
+  "path": "stock MLX",
+  "batch": 8,
+  "differing": 26491,
+  "total": 32000
+ },
+ {
+  "kind": "determinism",
+  "path": "batch invariant",
+  "batch": 2,
+  "differing": 0,
+  "total": 32000
+ },
+ {
+  "kind": "determinism",
+  "path": "batch invariant",
+  "batch": 4,
+  "differing": 0,
+  "total": 32000
+ },
+ {
+  "kind": "determinism",
+  "path": "batch invariant",
+  "batch": 8,
+  "differing": 0,
+  "total": 32000
+ }
+]

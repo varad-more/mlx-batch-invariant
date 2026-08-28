@@ -1,0 +1,26 @@
+[
+ {
+  "kind": "e2e",
+  "dtype": "mlx.core.float16",
+  "phase": "prefill 256 tok",
+  "batch": 1,
+  "layers": 16,
+  "params": 936445952,
+  "stock_s": 0.15903424999987692,
+  "bi_s": 0.45664287500017053,
+  "ratio": 2.8713492533873928,
+  "cost_pct": 65.17316732472449
+ },
+ {
+  "kind": "e2e",
+  "dtype": "mlx.core.float16",
+  "phase": "decode 32 tok",
+  "batch": 1,
+  "layers": 16,
+  "params": 936445952,
+  "stock_s": 0.8137010000000373,
+  "bi_s": 1.9847701669998514,
+  "ratio": 2.439188555746841,
+  "cost_pct": 59.002759436372656
+ }
+]
