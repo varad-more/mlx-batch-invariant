@@ -579,6 +579,28 @@ class TestStrictMode(unittest.TestCase):
             mx.eval(y)
         self.assertEqual(y.shape, (1, 4, 1, 48))
 
+    def test_unsupported_quantized_raises_and_falls_back(self):
+        """transpose=False is the one quantized shape the shim does not handle."""
+        import mlx.nn as nn
+        mx.random.seed(64)
+        lin = nn.Linear(512, 256, bias=False)
+        lin.apply(lambda p: p.astype(mx.float16))
+        q = nn.QuantizedLinear.from_linear(lin, bits=4)
+        x = rn((4, 256), mx.float16, 65)   # transpose=False computes x @ W, W is (256, 512)
+        mx.eval(x, q.parameters())
+        kw = dict(scales=q["scales"], biases=q["biases"], transpose=False,
+                  group_size=q.group_size, bits=q.bits)
+        ref = mx.quantized_matmul(x, q["weight"], **kw)
+        mx.eval(ref)
+        with bi.batch_invariant_mode(strict=True):
+            with self.assertRaises(NotImplementedError):
+                mx.quantized_matmul(x, q["weight"], **kw)
+        with bi.batch_invariant_mode(strict=False):
+            y = mx.quantized_matmul(x, q["weight"], **kw)
+            mx.eval(y)
+        self.assertEqual(int((bits(y) != bits(ref)).sum()), 0,
+                         "non-strict fallback did not reproduce stock exactly")
+
     def test_originals_are_restored_even_on_exception(self):
         import mlx.nn as nn
         before = (mx.matmul, mx.addmm, mx.fast.scaled_dot_product_attention,
