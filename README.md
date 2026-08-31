@@ -6,8 +6,8 @@ Batch-invariant, bitwise-deterministic kernels for [MLX](https://github.com/ml-e
 on Apple Silicon.
 
 Run the same prompt through a model twice. If the second run happens to be batched
-with someone else's request, MLX gives you different logits — not "slightly
-different", *82% of the bits*. This library gives you the same bits every time.
+with someone else's request, MLX gives you different logits:
+*82% of the bits* change. This library gives you the same bits every time.
 
 ```
 | path            | batch | logits differing from batch 1 |
@@ -37,7 +37,7 @@ with bi.batch_invariant_mode():
 Inside the block, `mx.matmul`, `mx.addmm`, the `@` operator, `nn.Linear` and
 `mx.fast.scaled_dot_product_attention` route through invariant kernels. Anything the
 library cannot make invariant raises `NotImplementedError` rather than silently
-falling back — pass `batch_invariant_mode(strict=False)` to get the fallback
+falling back. Pass `batch_invariant_mode(strict=False)` to get the fallback
 instead, which is useful for finding out what a model needs but is not something to
 ship.
 
@@ -58,7 +58,7 @@ mlx-bi verify
 
 Sweeps three dtypes, ten-ish shapes, eleven batch sizes and nine query lengths,
 comparing raw `uint32`/`uint16` bit patterns. It also checks that stock MLX is
-*still* batch-variant — if that control ever passes, MLX has been fixed and this
+*still* batch-variant. If that control ever passes, MLX has been fixed and this
 library is obsolete, which is a result worth printing.
 
 ## What "batch-invariant" means here
@@ -67,7 +67,7 @@ The output for a given row is bitwise identical regardless of:
 
 * how many other rows were in the batch (**batch size**),
 * which rows they were (**batch neighbours**),
-* how many query tokens were submitted together (**query length** — decode vs
+* how many query tokens were submitted together (**query length**, decode vs
   chunked prefill),
 * how long the KV cache is when the route changes under it (**context length**),
 * whether the call was eager, inside a graph, or inside `mx.compile`.
@@ -77,11 +77,11 @@ appear nowhere in the invariance assertions.
 
 ## Why MLX is not invariant
 
-Measured on an M4, MLX 0.32.0 — the full sweep is in [PHASE0.md](PHASE0.md).
+Measured on an M4, MLX 0.32.0. The full sweep is in [PHASE0.md](PHASE0.md).
 
 **Matmul.** Batch 1 dispatches `gemv`; batch 2 and up dispatch `steel_gemm` or
 `steel_gemm_splitk`, and the split-K partition count is an explicit function of M.
-Each of those kernels is bitwise stable on its own — 100% of the variance is which
+Each of those kernels is bitwise stable on its own: 100% of the variance is which
 one gets picked. Divergence starts at **batch 2**, in every dtype, at every shape:
 92–99% of float32 bits differ, at a median of 5–22 ULP.
 
@@ -93,7 +93,7 @@ one gets picked. Divergence starts at **batch 2**, in every dtype, at every shap
   model with a GQA factor of 2, decode and chunked prefill land on different
   reduction trees.
 * Crossing 4096 KV entries with GQA switches from one pass to two, so growing the
-  context changes the answer for keys that were already there — 3575 of 4096
+  context changes the answer for keys that were already there: 3575 of 4096
   float32 bits, even when the newly added key is fully masked out.
 
 **Everything else is already fine.** `rms_norm`, `layer_norm`, `softmax`, `sum`,
@@ -109,7 +109,7 @@ register tile, 64 threads. One threadgroup owns the entire reduction over K. The
 loop trip count is a function of K alone and a given row always lands at the same
 position in the same tile, so nothing about the summation order can move when M
 changes. No split-K, no atomics, float32 accumulators. The bias is added into the
-float32 accumulator and rounded once — MLX rounds before adding on its gemv path
+float32 accumulator and rounded once. MLX rounds before adding on its gemv path
 and after adding on its fused path, which is a second, separate source of variance.
 
 **Attention.** A single-pass vector kernel: one threadgroup per query row, 32
@@ -117,7 +117,7 @@ simdgroups walking the key sequence in fixed stride-32 order, online softmax in
 float32, then a fixed cross-simdgroup reduction. No split-KV, no second pass, no
 route switching. Structure follows MLX's own `sdpa_vector`, which means that
 wherever MLX takes its single-pass path this kernel is **bit-for-bit identical to
-stock MLX** — including all three mask forms. Adopting it costs no accuracy at all
+stock MLX**, including all three mask forms. Adopting it costs no accuracy
 in the common case.
 
 ## Accuracy
@@ -148,7 +148,7 @@ Full numbers and methodology in [BENCHMARK.md](BENCHMARK.md).
 
 For reference, Thinking Machines' CUDA `batch_invariant_ops` reports roughly 61.5%
 and SGLang's tuned deterministic mode roughly 34.35%. Different hardware, model and
-framework — directional only.
+framework, so directional only.
 
 Decode attention is free, and so is GEMM at the small batch sizes where MLX's own
 dispatch is deciding between `gemv` and `steel_gemm`. What remains is prefill,
@@ -158,8 +158,8 @@ rows of the batch is what makes a result depend on the batch. See
 
 ## Quantized models
 
-2, 4 and 8-bit affine checkpoints are covered. `mx.quantized_matmul` — which is
-what `nn.QuantizedLinear` calls — runs a fused invariant kernel that unpacks the
+2, 4 and 8-bit affine checkpoints are covered. `mx.quantized_matmul`, which is
+what `nn.QuantizedLinear` calls, runs a fused invariant kernel that unpacks the
 weight inside the K loop, so a real MLX checkpoint is invariant end to end:
 
 ```
@@ -169,9 +169,9 @@ batch-invariant: B=2 0/151936 bits, B=4 0/151936 bits, B=8 0/151936 bits
 ```
 
 It costs 2.1–4.1× on the quantized layers. The worst cell is decode, where the
-fixed 32-row tile dequantises a slab of weight to use one row of it — a deliberate
-refusal to pick a narrower kernel for small batches, which is the bug this library
-exists to prevent. See [ROADMAP.md](ROADMAP.md).
+fixed 32-row tile dequantises a slab of weight to use one row of it. That is a
+deliberate refusal to pick a narrower kernel for small batches, which is the bug
+this library exists to prevent. See [ROADMAP.md](ROADMAP.md).
 
 ## Limitations
 
@@ -190,7 +190,7 @@ MLX's single-pass path.
 * Thinking Machines, [Defeating Nondeterminism in LLM Inference](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/), and `batch_invariant_ops`
 * vLLM's batch-invariant backend, SGLang's deterministic mode
 * Megatron-Core `batch_invariant_kernels`
-* DeepSeek-V4's dual-kernel reproducible attention — discussed in [ROADMAP.md](ROADMAP.md)
+* DeepSeek-V4's dual-kernel reproducible attention, discussed in [ROADMAP.md](ROADMAP.md)
 
 All of the above are CUDA. This is the Metal one.
 
@@ -206,7 +206,7 @@ uv pip install mlx-lm && .venv/bin/python bench/real_model.py   # real 4-bit che
 
 CI runs the suite on GitHub's macOS runners, whose GPU is virtualised
 (`Apple Paravirtual device`). That checks portability, not behaviour on real
-Apple Silicon — stock MLX's quantized kernels are already invariant there, so the
+Apple Silicon: stock MLX's quantized kernels are already invariant there, so the
 quantized negative control skips. `mlx-bi verify` on the hardware you actually
 run on is the proof.
 
